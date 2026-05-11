@@ -1,6 +1,8 @@
 # phantom-code.nvim — Technical Reference
 
-This document covers internal architecture, the request pipeline, and all extension points. If you just want to install and use the plugin, see the [README](../README.md).
+This document covers internal architecture, the request pipeline, and all extension points.
+
+**Documentation set:** [docs/README.md](README.md) (index) · [Overview](overview.md) · [API](api.md) · [Examples](examples.md). For install and feature highlights, see the repository [README](../README.md).
 
 ---
 

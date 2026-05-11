@@ -1,3 +1,8 @@
+-- ============================================================
+-- Internal defaults (prompts, few-shots, templates)
+-- Advanced users only — most setups never need to touch these.
+-- ============================================================
+
 local default_prompt_prefix_first = [[
 You are an AI code completion engine modeled after Cursor Tab. Your sole function is to predict and complete what the user is most likely to type next, based on all available context.
 Core Behavior
@@ -157,7 +162,7 @@ Context after selection:
 Current question:
 <question>]]
 
--- use {{{ and }}} to wrap placeholders, which will be further processesed in other function
+-- Placeholders wrapped in {{{ }}} are substituted by make_system_prompt / make_chat_llm_shot.
 local default_system_template = '{{{prompt}}}\n{{{guidelines}}}\n{{{n_completion_template}}}'
 
 local default_fim_prompt = function(context_before_cursor, _, opts)
@@ -212,7 +217,6 @@ local default_chat_input = {
     end,
     context_before_cursor = function(context_before_cursor, _, opts)
         if opts.is_incomplete_before then
-            -- Remove first line when context is incomplete at start
             local _, rest = context_before_cursor:match '([^\n]*)\n(.*)'
             return rest or context_before_cursor
         end
@@ -220,7 +224,6 @@ local default_chat_input = {
     end,
     context_after_cursor = function(_, context_after_cursor, opts)
         if opts.is_incomplete_after then
-            -- Remove last line when context is incomplete at end
             local content = context_after_cursor:match '(.*)[\n][^\n]*$'
             return content or context_after_cursor
         end
@@ -240,192 +243,231 @@ local default_chat_input_prefix_first = vim.deepcopy(default_chat_input)
 default_chat_input_prefix_first.template =
     '{{{language}}}\n{{{tab}}}\n{{{diagnostics}}}\n<contextBeforeCursor>\n{{{context_before_cursor}}}<cursorPosition>\n<contextAfterCursor>\n{{{context_after_cursor}}}'
 
+-- ============================================================
+-- Configuration
+-- ============================================================
+
 local M = {
-    --- Inline Tab completion (virtual text, blink-cmp): UI, timing, prompts, provider overrides. Not used by Expand.
+    -- Backend used when inline.provider / expand.provider are both nil
+    provider = 'openai_compatible',
+
+    -- Max characters of buffer context (before + after cursor) sent per request
+    context_window = 16000,
+
+    -- Fraction of context_window allocated before the cursor (0.0–1.0; 0.75 = 3:1 ratio)
+    context_ratio = 0.75,
+
+    -- Default HTTP timeout in seconds; inline and expand can each override independently
+    request_timeout = 3,
+
+    -- Notification verbosity: false | "error" | "warn" | "verbose" | "debug"
+    notify = 'warn',
+
+    -- Curl binary name or path
+    curl_cmd = 'curl',
+
+    -- Extra arguments appended to every curl invocation
+    curl_extra_args = {},
+
+    -- HTTP proxy URL forwarded to curl; nil = no proxy
+    proxy = nil,
+
+    -- Nearby LSP diagnostics injected into prompts as additional context
+    diagnostics = {
+        -- Enable diagnostic injection
+        enable = false,
+        -- Lines above/below the cursor to scan for diagnostics
+        line_radius = 12,
+        -- Minimum severity to include (vim.diagnostic.severity.{HINT,INFO,WARN,ERROR})
+        min_severity = vim.diagnostic.severity.HINT,
+        -- Max characters of diagnostic text appended per prompt
+        max_chars = 2048,
+    },
+
+    -- Inline ghost text and blink.cmp completion
     inline = {
+        -- Override top-level provider for inline only; nil = inherit
+        provider = nil,
+
+        -- Extra options merged into provider_options[provider] for inline requests
+        provider_options = {},
+
+        -- Inline system-prompt overrides keyed by provider name
+        prompt_overrides = {},
+
         blink = {
-            -- When `virtualtext.auto_trigger_ft` sets `vim.b.phantom_code_virtual_text_auto_trigger`
-            -- for a buffer, the blink.cmp phantom source is disabled there (mutually exclusive auto inline).
+            -- Auto-trigger blink.cmp phantom source (disabled on virtual-text-active buffers)
             enable_auto_complete = true,
         },
+
         virtualtext = {
-            -- Filetypes that enable automatic ghost text on the buffer. When active, blink’s
-            -- phantom-code source does not run on that buffer (use virtual text keymaps or blink elsewhere).
+            -- Filetypes for ghost text auto-trigger; { '*' } = all, {} = none
             auto_trigger_ft = {},
-            -- specify file types where automatic virtual text completion should be
-            -- disabled. This option is useful when auto-completion is enabled for
-            -- all file types i.e., when auto_trigger_ft = { '*' }
+
+            -- Filetypes excluded from auto-trigger when auto_trigger_ft is broad
             auto_trigger_ignore_ft = {},
+
             keymap = {
-                accept = nil,
-                accept_line = nil,
-                -- accept n lines (prompts for number)
-                accept_n_lines = nil,
-                -- Cycle to next completion item, or manually invoke completion
-                next = nil,
-                -- Cycle to prev completion item, or manually invoke completion
-                prev = nil,
-                dismiss = nil,
+                accept = nil,         -- Insert full suggestion
+                accept_line = nil,    -- Insert first line only
+                accept_n_lines = nil, -- Insert N lines (prompts for count)
+                accept_word = nil,    -- Insert next word token (opt-in)
+                next = nil,           -- Next candidate / manually invoke
+                prev = nil,           -- Previous candidate / manually invoke
+                dismiss = nil,        -- Clear ghost text
             },
-            -- Whether show virtual text suggestion when the completion menu
-            -- (nvim-cmp or blink-cmp) is visible.
+
+            -- Show ghost text while nvim-cmp or blink popup is open
             show_on_completion_menu = false,
         },
-        provider = nil,
-        provider_options = {},
-        prompt_overrides = {},
-        --- If set, truncate each completion to at most this many lines (virtual text only).
+
+        -- Truncate ghost text to at most this many lines; nil = no limit
         max_lines = nil,
-        throttle = 500, -- only send the request every x milliseconds, use 0 to disable throttle.
-        -- debounce the request in x milliseconds, set 0 to disable debounce
+
+        -- Minimum ms between outgoing inline requests; 0 = no throttle
+        throttle = 500,
+
+        -- Delay after typing before sending a request (ms); 0 = off
         debounce = 150,
-        --- Minimum milliseconds between CursorMovedI-driven schedule() calls (0 = no extra throttle).
+
+        -- Minimum ms between CursorMovedI-triggered request restarts; 0 = off
         cursor_moved_throttle_ms = 50,
-        --- Optional cost-saving gates (all off by default). Does not skip comments/strings.
+
+        -- Cache size for typing-ahead prefix states (virtual text)
+        completion_cache_size = 10,
+
+        -- Optional gates that can suppress automatic inline requests
         request_gating = {
-            --- When true, skip auto inline request if current and previous lines are both empty/whitespace.
+            -- Skip auto-request when both the current and previous line are blank
             skip_consecutive_empty_lines = false,
         },
-        --- Resolve imports and attach snippets from imported files to inline LLM context.
+
+        -- Snippets from resolved relative imports prepended to inline context
         import_context = {
             enable = true,
-            max_chars = 4000,
-            max_files = 3,
-            max_imports_scanned = 64,
+            max_chars = 4000,         -- Total characters drawn from imported files
+            max_files = 3,            -- Maximum import files appended
+            max_imports_scanned = 64, -- Import lines scanned per request
         },
-        -- If completion item has multiple lines, create another completion item
-        -- only containing its first line. This option only has impact for cmp and
-        -- blink. For virtualtext, no single line entry will be added.
+
+        -- Add a single-line duplicate entry for multi-line candidates (cmp/blink only)
         add_single_line_entry = true,
-        -- Ignored: inline completion always requests exactly one candidate (`utils.INLINE_N_COMPLETIONS`).
-        -- Kept in config for backward compatibility with existing user `setup()` tables.
+
+        -- Kept for backward compatibility; inline always requests exactly one candidate
         n_completions = 1,
-        --  Length of context after cursor used to filter completion text.
-        --
-        -- This setting helps prevent the language model from generating redundant
-        -- text.  When filtering completions, the system compares the suffix of a
-        -- completion candidate with the text immediately following the cursor.
-        --
-        -- If the length of the longest common substring between the end of the
-        -- candidate and the beginning of the post-cursor context exceeds this
-        -- value, that common portion is trimmed from the candidate.
-        --
-        -- For example, if the value is 15, and a completion candidate ends with a
-        -- 20-character string that exactly matches the 20 characters following the
-        -- cursor, the candidate will be truncated by those 20 characters before
-        -- being delivered.
+
+        -- Trim completion suffix when it overlaps this many chars with post-cursor text
         after_cursor_filter_length = 15,
-        -- Similar to after_cursor_filter_length but trim the completion item from
-        -- prefix instead of suffix.
+
+        -- Trim completion prefix when it overlaps this many chars with pre-cursor text
         before_cursor_filter_length = 2,
-        --- On accept (virtual text and blink): re-trim overlap; drop duplicate `{` after `{`; drop trailing `}` when `}` already follows the cursor (including on the next line).
+
+        -- Fix brace/overlap artifacts when accepting a suggestion (virtual text + blink)
         normalize_on_accept = true,
-        -- Optional: after built-in extras, `function(context, cmp_context) return context end`. Return a new table to replace context.
+
+        -- Optional function(context, cmp_context) → context called after built-in enrichment
         context_enrich = nil,
-        -- **List** of functions to execute. If any function returns `false`, phantom-code
-        -- will not trigger auto-completion. Manual completion can still be invoked.
+
+        -- Functions called before auto-inline; any returning false suppresses the request
         ---@type (fun(): boolean)[]
         enable_predicates = {},
     },
-    --- Expand selection flow (visual range + prompt + chat). Separate prompts and jobs from inline.
+
+    -- Expand selection / generate-at-cursor flow
     expand = {
+        -- Master switch; set true to enable expand keymaps and commands
         enable = false,
+
+        -- Override top-level provider for expand only; nil = inherit
         provider = nil,
+
+        -- Extra options merged into provider_options[provider] for expand requests
         provider_options = {},
+
+        -- System prompt for implement mode (model must return phantom_expand XML)
         system = default_expand_system,
-        --- Used when Expand is invoked with an empty selection (cursor-only / generate mode).
+
+        -- System prompt for generate-at-cursor when the selection is empty
         system_generate = default_expand_system_generate,
+
+        -- User message template for implement; placeholders: <instruction>, <selectedCode>, etc.
         user_template = default_expand_user_template,
-        --- Strip/inject `@file:` and `@symbol:` in the instruction; total budget for referenced bodies.
+
+        -- Character budget for @file: / @symbol: instruction references
         max_reference_chars = 8000,
-        --- Max stored user+assistant pairs for implement revise (default 16 messages = 8 rounds). 0 = unlimited.
+
+        -- Max stored user+assistant message pairs for revise history; 0 = unlimited
         max_conversation_messages = 16,
+
+        -- Extra few-shot messages injected into the implement chat payload
         few_shots = nil,
-        --- Deep-merge over top-level `diagnostics` for Expand only.
+
+        -- Diagnostic config deep-merged over top-level diagnostics for expand only
         diagnostics = {},
+
+        -- Override top-level context_window for expand file surround; nil = inherit
         context_window = nil,
-        --- When set, overrides top-level `context_ratio` for Expand file surround only.
+
+        -- Override top-level context_ratio for expand file surround; nil = inherit
         context_ratio = nil,
+
+        -- Override top-level request_timeout for expand HTTP; nil = inherit
         request_timeout = nil,
-        --- When true (default), starting a new Expand or calling dismiss cancels in-flight requests and clears prior previews. When false, multiple expands may run concurrently; use float preview so each preview has its own accept/dismiss keys. Concurrent inline previews on the same buffer share one accept/dismiss binding (last preview wins).
+
+        -- Cancel in-flight expand jobs when a new expand or dismiss is triggered
         cancel_inflight = true,
+
+        -- Provider-level max_tokens for expand responses; nil = provider default
         max_tokens = nil,
-        --- When true, merge model output with the selection (empty `{}` body fill, strip echoed selection, trim extra `}`).
+
+        -- Merge model output with selection using built-in brace/echo rules
         merge = true,
-        --- Optional `function(selected, response, { bufnr, start_row }) return string end` overrides built-in merge.
+
+        -- Custom merge: function(selected, response, { bufnr, start_row }) → string
         merge_fn = nil,
-        --- Legacy: implement flow always uses inline diff on the buffer; this is ignored for new UI.
+
+        -- Legacy field; implement always uses inline diff regardless of this value
         preview = 'inline_extmark',
-        --- `'float'`: anchored multi-line prompt. `'input'`: `vim.ui.input` on cmdline.
+
+        -- Instruction input UI: 'float' = anchored popup, 'input' = vim.ui.input
         prompt_ui = 'float',
-        --- Ask mode: separate system and user template (`<question>`, `<conversationBlock>`, same context placeholders as expand).
+
+        -- System prompt for ask mode
         system_ask = default_expand_system_ask,
+
+        -- User message template for ask mode; placeholders: <question>, <conversationBlock>, etc.
         user_template_ask = default_expand_user_template_ask,
-        --- Float popup anchored near the selection (`relative = win` when visible).
+
         ui = {
-            prompt_height = 10,
-            prompt_width = 72,
-            ask_height = 16,
-            ask_width = 80,
-            --- End-of-line virtual text on the selection row when expand UI is collapsed via `toggle_window` (empty string disables).
+            prompt_height = 10,              -- Max height (lines) for the implement prompt float
+            prompt_width = 72,               -- Width (columns) for the implement prompt float
+            ask_height = 16,                 -- Max height (lines) for the ask float
+            ask_width = 80,                  -- Width (columns) for the ask float
+            -- Virtual text shown on the selection row when the expand UI is collapsed; "" = off
             collapsed_marker = ' ⋯ expand',
         },
-        --- Inline diff highlights (implemented in expand_inline_diff.lua).
+
         inline_diff = {
+            -- Draw expand preview as buffer highlights and virtual '+' lines
             enable = true,
         },
+
         keymap = {
-            invoke = nil,
-            ask = nil,
-            accept = nil,
-            --- Same as `accept` but not buffer-local; works from any window while in review (optional).
-            accept_global = nil,
-            dismiss = nil,
-            revise = nil,
-            --- Toggle focus between code buffer and nearest expand window.
-            focus_window = nil,
-            --- Hide or show the expand float (ask session or pinned implement prompt after submit).
-            toggle_window = nil,
+            invoke = nil,        -- Open implement prompt
+            ask = nil,           -- Open ask prompt / toggle ask float
+            accept = nil,        -- Apply implement proposal (buffer-local)
+            accept_global = nil, -- Same as accept but global while in review
+            dismiss = nil,       -- Cancel session and clear diff
+            revise = nil,        -- Submit a revised instruction
+            focus_window = nil,  -- Toggle focus between code buffer and expand UI
+            toggle_window = nil, -- Hide or show the expand float
         },
     },
-    -- Must match `lua/phantom-code/backends/<name>.lua` (codestral/gemini have no module in-repo).
-    provider = 'openai_compatible',
-    -- the maximum total characters of the context before and after the cursor
-    -- 16000 characters typically equate to approximately 4,000 tokens for
-    -- LLMs.
-    context_window = 16000,
-    -- when the total characters exceed the context window, the ratio of
-    -- context before cursor and after cursor, the larger the ratio the more
-    -- context before cursor will be used. This option should be between 0 and
-    -- 1, context_ratio = 0.75 means the ratio will be 3:1.
-    context_ratio = 0.75,
-    -- Control notification display for request status
-    -- Notification options:
-    -- false: Disable all notifications (use boolean false, not string "false")
-    -- "debug": Display all notifications (comprehensive debugging)
-    -- "verbose": Display most notifications
-    -- "warn": Display warnings and errors only
-    -- "error": Display errors only
-    notify = 'warn',
-    -- The request timeout, measured in seconds. When streaming is enabled
-    -- (stream = true), setting a shorter request_timeout allows for faster
-    -- retrieval of completion items, albeit potentially incomplete.
-    -- Conversely, with streaming disabled (stream = false), a timeout
-    -- occurring before the LLM returns results will yield no completion items.
-    request_timeout = 3,
-    -- Command used to make HTTP requests.
-    curl_cmd = 'curl',
-    -- Extra arguments passed to curl (list of strings).
-    curl_extra_args = {},
-    proxy = nil,
-    -- Nearby LSP diagnostics for prompts; fills `opts.diagnostics_context` for chat/FIM templates.
-    diagnostics = {
-        enable = false,
-        line_radius = 12,
-        min_severity = vim.diagnostic.severity.HINT,
-        max_chars = 2048,
-    },
 }
+
+-- ============================================================
+-- Exported defaults for advanced overrides
+-- ============================================================
 
 M.default_system = {
     template = default_system_template,
@@ -458,6 +500,10 @@ M.default_fim_template = {
     suffix = default_fim_suffix,
 }
 
+-- ============================================================
+-- Provider defaults
+-- ============================================================
+
 M.provider_options = {
     codestral = {
         model = 'codestral-latest',
@@ -466,12 +512,10 @@ M.provider_options = {
         stream = true,
         template = M.default_fim_template,
         optional = {
-            stop = nil, -- the identifier to stop the completion generation
+            stop = nil,
             max_tokens = nil,
         },
-        -- a list of functions to transform the endpoint, header, and request body
         transform = {},
-        -- Custom function to extract LLM-generated text from JSON output
         get_text_fn = {},
     },
     openai = {
@@ -486,7 +530,6 @@ M.provider_options = {
             stop = nil,
             max_tokens = nil,
         },
-        -- a list of functions to transform the endpoint, header, and request body
         transform = {},
     },
     claude = {
@@ -501,7 +544,6 @@ M.provider_options = {
         optional = {
             stop_sequences = nil,
         },
-        -- a list of functions to transform the endpoint, header, and request body
         transform = {},
     },
     openai_compatible = {
@@ -517,7 +559,6 @@ M.provider_options = {
             stop = nil,
             max_tokens = nil,
         },
-        -- a list of functions to transform the endpoint, header, and request body
         transform = {},
     },
     gemini = {
@@ -529,7 +570,6 @@ M.provider_options = {
         few_shots = M.default_few_shots_prefix_first,
         stream = true,
         optional = {},
-        -- a list of functions to transform the endpoint, header, and request body
         transform = {},
     },
     openai_fim_compatible = {
@@ -543,9 +583,7 @@ M.provider_options = {
             stop = nil,
             max_tokens = nil,
         },
-        -- a list of functions to transform the endpoint, header, and request body
         transform = {},
-        -- Custom function to extract LLM-generated text from JSON output
         get_text_fn = {},
     },
 }

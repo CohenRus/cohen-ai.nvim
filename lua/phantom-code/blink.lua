@@ -26,11 +26,14 @@ function M.new()
     local source = setmetatable({}, { __index = M })
     source.is_in_throttle = nil
     source.debounce_timer = nil
+    source.last_changedtick = nil
+    source.last_bufnr = nil
     return source
 end
 
 function M:get_completions(ctx, callback)
     local config = require('phantom-code').config
+    local bufnr = ctx.bufnr
     local not_manual_completion = ctx.trigger.kind ~= 'manual'
 
     -- we want to always invoke completion when invoked manually
@@ -52,6 +55,16 @@ function M:get_completions(ctx, callback)
         if not_manual_completion and utils.should_skip_inline_request(cmp_ctx) then
             callback()
             return
+        end
+
+        if not_manual_completion then
+            local current_tick = vim.api.nvim_buf_get_changedtick(bufnr)
+            if current_tick == self.last_changedtick and bufnr == self.last_bufnr then
+                callback()
+                return
+            end
+            self.last_changedtick = current_tick
+            self.last_bufnr = bufnr
         end
 
         -- NOTE: blink will accumulate completion items during multiple

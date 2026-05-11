@@ -5,6 +5,14 @@
 
 AI-powered code completion and rewriting for Neovim. Get inline ghost text suggestions as you type, and rewrite selected code with natural language instructions.
 
+## Documentation
+
+- **[docs/README.md](docs/README.md)** — documentation index and checklist
+- **[docs/overview.md](docs/overview.md)** — purpose, concepts, glossary
+- **[docs/api.md](docs/api.md)** — `setup`, commands, Lua modules, errors
+- **[docs/examples.md](docs/examples.md)** — recipes, practices, pitfalls
+- **[docs/implementation.md](docs/implementation.md)** — architecture summary, design decisions, dependencies
+
 ## Highlights
 
 - **Inline completion** -- ghost text suggestions appear as you type, powered by any LLM
@@ -140,344 +148,254 @@ You can use different providers for inline and Expand by setting `inline.provide
 
 ## Configuration
 
-Defaults below mirror `lua/phantom-code/config.lua`. **You do not need to paste this whole block**—only override what you want. Pattern: a one-line comment above each option (what it does), then `key = default,` with a trailing comment for allowed types or values (multi-line strings end with `]], -- type` on the closing line).
+Defaults below mirror `lua/phantom-code/config.lua`. **You do not need to paste this whole block** — only override what you want.
 
-For provider entries, `system` / `few_shots` / `chat_input` (chat) and `template` (FIM) are set inside the plugin unless you add them yourself; the snippet lists the scalar defaults only.
+For provider entries, `system` / `few_shots` / `chat_input` (chat) and `template` (FIM) are managed by the plugin; only scalar defaults are listed here.
 
 ```lua
 require('phantom-code').setup({
-  -- Default backend name when `inline.provider` / `expand.provider` are nil (must match `lua/phantom-code/backends/<name>.lua`)
-  provider = 'openai_compatible', -- string
+  -- Backend used when inline.provider / expand.provider are both nil
+  provider = 'openai_compatible',
 
-  -- Max characters of buffer context around the cursor sent to inline / default provider prompts
-  context_window = 16000, -- integer
+  -- Max characters of buffer context (before + after cursor) sent per request
+  context_window = 16000,
 
-  -- Share of `context_window` used for text before the cursor; rest after (0.0–1.0)
-  context_ratio = 0.75, -- number 0–1
+  -- Fraction of context_window allocated before the cursor (0.0–1.0; 0.75 = 3:1 ratio)
+  context_ratio = 0.75,
 
-  -- HTTP timeout in seconds for inline completion (and default when expand does not override)
-  request_timeout = 3, -- integer (seconds)
+  -- Default HTTP timeout in seconds; inline and expand can each override independently
+  request_timeout = 3,
 
-  -- Which notifications the plugin may show
-  notify = 'warn', -- false | "error" | "warn" | "verbose" | "debug"
+  -- Notification verbosity: false | "error" | "warn" | "verbose" | "debug"
+  notify = 'warn',
 
-  -- Curl binary used for HTTP
-  curl_cmd = 'curl', -- string
+  -- Curl binary name or path
+  curl_cmd = 'curl',
 
-  -- Extra curl CLI arguments
-  curl_extra_args = {}, -- list of strings
+  -- Extra arguments appended to every curl invocation
+  curl_extra_args = {},
 
-  -- Proxy URL for curl, or nil
-  proxy = nil, -- string | nil
+  -- HTTP proxy URL forwarded to curl; nil = no proxy
+  proxy = nil,
 
-  -- Inject nearby LSP diagnostics into inline / FIM / chat-style prompts (`opts.diagnostics_context`)
+  -- Nearby LSP diagnostics injected into prompts as additional context
   diagnostics = {
-    -- Turn diagnostic injection on or off
-    enable = false, -- boolean
-    -- How many lines above/below the cursor to scan
-    line_radius = 12, -- integer
-    -- Minimum diagnostic severity to include (vim.diagnostic.severity.*)
-    min_severity = vim.diagnostic.severity.HINT, -- integer (vim.diagnostic.severity)
-    -- Max characters of diagnostic text in the prompt
-    max_chars = 2048, -- integer
+    -- Enable diagnostic injection
+    enable = false,
+    -- Lines above/below the cursor to scan for diagnostics
+    line_radius = 12,
+    -- Minimum severity to include (vim.diagnostic.severity.{HINT,INFO,WARN,ERROR})
+    min_severity = vim.diagnostic.severity.HINT,
+    -- Max characters of diagnostic text appended per prompt
+    max_chars = 2048,
   },
 
   inline = {
-    -- Override top-level `provider` for inline only; nil = use `provider`
-    provider = nil, -- string | nil
+    -- Override top-level provider for inline only; nil = inherit
+    provider = nil,
+    -- Extra options merged into provider_options[provider] for inline requests
+    provider_options = {},
+    -- Inline system-prompt overrides keyed by provider name
+    prompt_overrides = {},
 
-    -- Options merged into `provider_options[inline.provider]` for inline
-    provider_options = {}, -- table
-
-    -- Override pieces of the inline system prompt (plugin-specific keys)
-    prompt_overrides = {}, -- table
-
-    -- blink.cmp integration (phantom source is off on buffers where virtual-text auto is on)
     blink = {
-      enable_auto_complete = true, -- boolean — automatic blink triggers when virtual auto-trigger is off
+      -- Auto-trigger blink.cmp phantom source (disabled on virtual-text-active buffers)
+      enable_auto_complete = true,
     },
 
-    -- Ghost-text (virtual text) UI
     virtualtext = {
-      -- Filetypes that auto-trigger ghost text (empty = none; often `{ '*' }`). When set for the buffer,
-      -- the blink.cmp phantom-code source does not run there.
-      auto_trigger_ft = {}, -- list of filetype strings
+      -- Filetypes for ghost text auto-trigger; { '*' } = all, {} = none
+      auto_trigger_ft = {},
+      -- Filetypes excluded from auto-trigger when auto_trigger_ft is broad
+      auto_trigger_ignore_ft = {},
 
-      -- Filetypes excluded when `auto_trigger_ft` is broad (e.g. `{ '*' }`)
-      auto_trigger_ignore_ft = {}, -- list of filetype strings
-
-      -- Buffer-local keymaps for virtual text (nil = unbound)
       keymap = {
-        accept = nil, -- string | nil — insert full suggestion
-        accept_line = nil, -- string | nil — first line only
-        accept_n_lines = nil, -- string | nil — prompts for count
-        next = nil, -- string | nil — next candidate / manual trigger
-        prev = nil, -- string | nil — previous candidate / manual trigger
-        dismiss = nil, -- string | nil — clear ghost text
+        accept = nil,         -- Insert full suggestion
+        accept_line = nil,    -- Insert first line only
+        accept_n_lines = nil, -- Insert N lines (prompts for count)
+        accept_word = nil,    -- Insert next word token (opt-in)
+        next = nil,           -- Next candidate / manually invoke
+        prev = nil,           -- Previous candidate / manually invoke
+        dismiss = nil,        -- Clear ghost text
       },
 
-      -- Show ghost text while nvim-cmp / blink popup is open
-      show_on_completion_menu = false, -- boolean
+      -- Show ghost text while nvim-cmp or blink popup is open
+      show_on_completion_menu = false,
     },
 
-    -- Truncate each completion to at most this many lines (virtual text only)
-    max_lines = nil, -- integer | nil
+    -- Truncate ghost text to at most this many lines; nil = no limit
+    max_lines = nil,
+    -- Minimum ms between outgoing inline requests; 0 = no throttle
+    throttle = 500,
+    -- Delay after typing before sending a request (ms); 0 = off
+    debounce = 150,
+    -- Minimum ms between CursorMovedI-triggered request restarts; 0 = off
+    cursor_moved_throttle_ms = 50,
+    -- Cache size for typing-ahead prefix states (virtual text)
+    completion_cache_size = 10,
 
-    -- Minimum milliseconds between inline HTTP requests (0 = no throttle)
-    throttle = 500, -- integer
-
-    -- Debounce after typing before requesting (0 = off)
-    debounce = 150, -- integer
-
-    -- Minimum ms between CursorMovedI-driven schedule restarts (0 = off)
-    cursor_moved_throttle_ms = 50, -- integer
-
-    -- Extra gates before sending an inline request
+    -- Optional gates that can suppress automatic inline requests
     request_gating = {
-      skip_consecutive_empty_lines = false, -- boolean — skip if current and previous line are blank
+      -- Skip auto-request when both the current and previous line are blank
+      skip_consecutive_empty_lines = false,
     },
 
-    -- Snippets from resolved relative imports added to inline context
+    -- Snippets from resolved relative imports prepended to inline context
     import_context = {
-      enable = true, -- boolean
-      max_chars = 4000, -- integer — total chars from imports
-      max_files = 3, -- integer — max files appended
-      max_imports_scanned = 64, -- integer — import lines scanned
+      enable = true,
+      max_chars = 4000,         -- Total characters drawn from imported files
+      max_files = 3,            -- Maximum import files appended
+      max_imports_scanned = 64, -- Import lines scanned per request
     },
 
-    -- Add a single-line duplicate item for multi-line candidates (cmp/blink)
-    add_single_line_entry = true, -- boolean
-
-    -- Ignored at runtime (inline always requests one candidate); kept for compatibility
-    n_completions = 1, -- integer
-
-    -- Trim completion suffix when it overlaps this many chars with text after the cursor
-    after_cursor_filter_length = 15, -- integer
-
-    -- Trim completion prefix overlap with text before the cursor
-    before_cursor_filter_length = 2, -- integer
-
-    -- On accept, normalize braces / overlap with cursor (virtual text + blink)
-    normalize_on_accept = true, -- boolean
-
-    -- Optional `function(context, cmp_context) return context end` after built-in enrichment
-    context_enrich = nil, -- function | nil
-
-    -- If any function returns false, auto inline does not run (manual still works)
-    enable_predicates = {}, -- list of fun(): boolean
+    -- Add a single-line duplicate entry for multi-line candidates (cmp/blink only)
+    add_single_line_entry = true,
+    -- Kept for backward compatibility; inline always requests exactly one candidate
+    n_completions = 1,
+    -- Trim completion suffix when it overlaps this many chars with post-cursor text
+    after_cursor_filter_length = 15,
+    -- Trim completion prefix when it overlaps this many chars with pre-cursor text
+    before_cursor_filter_length = 2,
+    -- Fix brace/overlap artifacts when accepting a suggestion (virtual text + blink)
+    normalize_on_accept = true,
+    -- Optional function(context, cmp_context) → context called after built-in enrichment
+    context_enrich = nil,
+    -- Functions called before auto-inline; any returning false suppresses the request
+    enable_predicates = {},
   },
 
   expand = {
-    -- Master switch for expand keymaps / commands
-    enable = false, -- boolean
+    -- Master switch; set true to enable expand keymaps and commands
+    enable = false,
+    -- Override top-level provider for expand only; nil = inherit
+    provider = nil,
+    -- Extra options merged into provider_options[provider] for expand requests
+    provider_options = {},
 
-    -- Expand-only provider; nil = top-level `provider`
-    provider = nil, -- string | nil
+    -- System prompt for implement mode (model must return phantom_expand XML)
+    system = [[...plugin default, see config.lua...]],
+    -- System prompt for generate-at-cursor when the selection is empty
+    system_generate = [[...plugin default, see config.lua...]],
+    -- User message template; placeholders: <instruction>, <selectedCode>, <referencedContextBlock>, etc.
+    user_template = [[...plugin default, see config.lua...]],
 
-    -- Merged into `provider_options[expand.provider]`
-    provider_options = {}, -- table
+    -- Character budget for @file: / @symbol: instruction references
+    max_reference_chars = 8000,
+    -- Max stored user+assistant message pairs for revise history; 0 = unlimited
+    max_conversation_messages = 16,
+    -- Extra few-shot messages injected into the implement chat payload
+    few_shots = nil,
+    -- Diagnostic config deep-merged over top-level diagnostics for expand only
+    diagnostics = {},
+    -- Override top-level context_window for expand file surround; nil = inherit
+    context_window = nil,
+    -- Override top-level context_ratio for expand file surround; nil = inherit
+    context_ratio = nil,
+    -- Override top-level request_timeout for expand HTTP; nil = inherit
+    request_timeout = nil,
+    -- Cancel in-flight expand jobs when a new expand or dismiss is triggered
+    cancel_inflight = true,
+    -- Provider-level max_tokens for expand responses; nil = provider default
+    max_tokens = nil,
+    -- Merge model output with selection using built-in brace/echo rules
+    merge = true,
+    -- Custom merge: function(selected, response, { bufnr, start_row }) → string
+    merge_fn = nil,
+    -- Legacy field; implement always uses inline diff regardless of this value
+    preview = 'inline_extmark',
+    -- Instruction input UI: 'float' = anchored popup, 'input' = vim.ui.input
+    prompt_ui = 'float',
 
-    -- Implement mode: system message (default below is the plugin XML contract)
-    system = [[You are a precise coding assistant. The user selected code and gave an instruction.
-
-Respond ONLY with a single XML document (no markdown fences, no preamble) of this shape:
-
-<phantom_expand>
-  <!-- Option A — replace the entire selection: -->
-  <replacement>...full new text for the selection...</replacement>
-
-  <!-- Option B — one or more edits inside the selection (line numbers are 1-based; line 1 = first line of the selection): -->
-  <!-- <edit startLine="2" endLine="4">new lines replacing those lines</edit> -->
-
-  Use Option B when several localized changes are clearer than one big replacement. You may use multiple <edit> elements; they must not overlap. Prefer Option A for small selections or full rewrites.
-
-  Do not echo the original selected code outside the tags. No explanations outside the XML.
-]], -- string | fun(cfg): string
-
-    -- Generate-at-cursor (empty selection) system prompt
-    system_generate = [[You are a precise coding assistant. The user wants new code inserted at the cursor (there may be no selected text).
-
-Respond ONLY with a single XML document (no markdown fences, no preamble) of this shape:
-
-<phantom_expand>
-  <replacement>...code to insert at the cursor...</replacement>
-</phantom_expand>
-
-Prefer concise, idiomatic code that fits the surrounding file. No explanations outside the XML.
-]], -- string | fun(cfg): string
-
-    -- Implement user message template (`<instruction>`, `<selectedCode>`, `<referencedContextBlock>`, …)
-    user_template = [[File: <filePath>
-Language: <fileType>
-
-<referencedContextBlock>
-Instruction:
-<instruction>
-
-Selected code:
-<selectedCode>
-
-Context before selection:
-<fileContextBefore>
-
-Context after selection:
-<fileContextAfter>
-<diagnosticsBlock>]], -- string | fun(vars, cfg): string
-
-    -- `@file:` / `@symbol:` payload budget
-    max_reference_chars = 8000, -- integer
-
-    -- Cap stored implement revise messages (user+assistant pairs); 0 = unlimited
-    max_conversation_messages = 16, -- integer
-
-    -- Extra few-shot messages for implement chat API
-    few_shots = nil, -- list of { role, content } | nil
-
-    -- Merged over top-level `diagnostics` for expand prompts only
-    diagnostics = {}, -- table
-
-    -- Override top-level `context_window` for expand file surround
-    context_window = nil, -- integer | nil
-
-    -- Override top-level `context_ratio` for expand file surround
-    context_ratio = nil, -- number | nil
-
-    -- Override top-level `request_timeout` for expand HTTP
-    request_timeout = nil, -- integer | nil
-
-    -- New expand / dismiss cancels in-flight jobs when true
-    cancel_inflight = true, -- boolean
-
-    -- Provider-specific max tokens when supported
-    max_tokens = nil, -- integer | nil
-
-    -- Merge model output with selection using built-in rules
-    merge = true, -- boolean
-
-    -- Custom merge: `function(selected, response, { bufnr, start_row }) return string end`
-    merge_fn = nil, -- function | nil
-
-    -- Legacy preview mode (implement uses inline diff regardless)
-    preview = 'inline_extmark', -- string
-
-    -- Implement instruction UI: anchored float vs cmdline input
-    prompt_ui = 'float', -- "float" | "input"
-
-    -- Ask mode system prompt
-    system_ask = [[You are a helpful coding assistant. Answer clearly and concisely. You may use short markdown (fenced code blocks) when showing examples. Do not invent file paths or APIs not implied by the context.]], -- string | fun(cfg): string
-
-    -- Ask user template (`<question>`, `<conversationBlock>`, …)
-    user_template_ask = [[File: <filePath>
-Language: <fileType>
-
-Selected code:
-<selectedCode>
-
-Context before selection:
-<fileContextBefore>
-
-Context after selection:
-<fileContextAfter>
-<diagnosticsBlock>
-
-<conversationBlock>
-
-Current question:
-<question>]], -- string | fun(vars, cfg): string
+    -- System prompt for ask mode
+    system_ask = [[...plugin default, see config.lua...]],
+    -- User message template for ask mode; placeholders: <question>, <conversationBlock>, etc.
+    user_template_ask = [[...plugin default, see config.lua...]],
 
     ui = {
-      -- Max height (lines) for implement prompt float
-      prompt_height = 10, -- integer
-
-      -- Width (columns) for implement float
-      prompt_width = 72, -- integer
-
-      -- Max height (lines) for ask float
-      ask_height = 16, -- integer
-
-      -- Width (columns) for ask float
-      ask_width = 80, -- integer
-
-      -- End-of-line virtual text on the selection row while expand UI is hidden (`toggle_window`); `""` disables
-      collapsed_marker = ' ⋯ expand', -- string
+      prompt_height = 10,             -- Max height (lines) for the implement prompt float
+      prompt_width = 72,              -- Width (columns) for the implement prompt float
+      ask_height = 16,                -- Max height (lines) for the ask float
+      ask_width = 80,                 -- Width (columns) for the ask float
+      -- Virtual text shown on the selection row when the expand UI is collapsed; "" = off
+      collapsed_marker = ' ⋯ expand',
     },
 
     inline_diff = {
-      -- Draw expand preview as buffer highlights + virtual lines
-      enable = true, -- boolean
+      -- Draw expand preview as buffer highlights and virtual '+' lines
+      enable = true,
     },
 
     keymap = {
-      invoke = nil, -- string | nil — implement expand
-      ask = nil, -- string | nil — ask / toggle ask
-      accept = nil, -- string | nil — apply proposal (buffer-local on code + prompt)
-      accept_global = nil, -- string | nil — same as accept, global map while in review (any window)
-      dismiss = nil, -- string | nil — cancel session
-      revise = nil, -- string | nil — new instruction in review
-      focus_window = nil, -- string | nil — jump between code and expand UI
-      toggle_window = nil, -- string | nil — hide/show expand float (ask or pinned implement prompt)
+      invoke = nil,        -- Open implement prompt
+      ask = nil,           -- Open ask prompt / toggle ask float
+      accept = nil,        -- Apply implement proposal (buffer-local)
+      accept_global = nil, -- Same as accept but global while in review
+      dismiss = nil,       -- Cancel session and clear diff
+      revise = nil,        -- Submit a revised instruction
+      focus_window = nil,  -- Toggle focus between code buffer and expand UI
+      toggle_window = nil, -- Hide or show the expand float
     },
   },
 
-  -- Per-provider defaults (merge). Omitted nested tables use `lua/phantom-code/config.lua`.
+  -- Per-provider defaults (merged with plugin internals; omit any key to use the plugin default)
   provider_options = {
     codestral = {
-      model = 'codestral-latest', -- string
-      end_point = 'https://codestral.mistral.ai/v1/fim/completions', -- string
-      api_key = 'CODESTRAL_API_KEY', -- string — env var name
-      stream = true, -- boolean
-      optional = { stop = nil, max_tokens = nil }, -- table
-      transform = {}, -- list of transform functions
-      get_text_fn = {}, -- list — extract text from JSON
+      model = 'codestral-latest',
+      end_point = 'https://codestral.mistral.ai/v1/fim/completions',
+      api_key = 'CODESTRAL_API_KEY', -- env var name
+      stream = true,
+      optional = { stop = nil, max_tokens = nil },
+      transform = {},   -- list of request transform functions
+      get_text_fn = {}, -- list of functions to extract text from JSON response
     },
 
     openai = {
-      model = 'gpt-5.4-nano', -- string
-      api_key = 'OPENAI_API_KEY', -- string — env var name
-      end_point = 'https://api.openai.com/v1/chat/completions', -- string
-      stream = true, -- boolean
-      optional = { stop = nil, max_tokens = nil }, -- table
-      transform = {}, -- list
+      model = 'gpt-5.4-nano',
+      api_key = 'OPENAI_API_KEY', -- env var name
+      end_point = 'https://api.openai.com/v1/chat/completions',
+      stream = true,
+      optional = { stop = nil, max_tokens = nil },
+      transform = {},
     },
 
     claude = {
-      max_tokens = 256, -- integer
-      api_key = 'ANTHROPIC_API_KEY', -- string — env var name
-      model = 'claude-haiku-4-5', -- string
-      end_point = 'https://api.anthropic.com/v1/messages', -- string
-      stream = true, -- boolean
-      optional = { stop_sequences = nil }, -- table
-      transform = {}, -- list
+      max_tokens = 256,
+      api_key = 'ANTHROPIC_API_KEY', -- env var name
+      model = 'claude-haiku-4-5',
+      end_point = 'https://api.anthropic.com/v1/messages',
+      stream = true,
+      optional = { stop_sequences = nil },
+      transform = {},
     },
 
     openai_compatible = {
-      model = 'mistralai/devstral-small', -- string
-      api_key = 'OPENROUTER_API_KEY', -- string — env var name
-      end_point = 'https://openrouter.ai/api/v1/chat/completions', -- string
-      name = 'Openrouter', -- string — sub-provider label for model cards, etc.
-      stream = true, -- boolean
-      optional = { stop = nil, max_tokens = nil }, -- table
-      transform = {}, -- list
+      model = 'mistralai/devstral-small',
+      api_key = 'OPENROUTER_API_KEY', -- env var name
+      end_point = 'https://openrouter.ai/api/v1/chat/completions',
+      name = 'Openrouter', -- label shown in notifications / model cards
+      stream = true,
+      optional = { stop = nil, max_tokens = nil },
+      transform = {},
     },
 
     gemini = {
-      model = 'gemini-2.0-flash', -- string
-      api_key = 'GEMINI_API_KEY', -- string — env var name
-      end_point = 'https://generativelanguage.googleapis.com/v1beta/models', -- string
-      stream = true, -- boolean
-      optional = {}, -- table
-      transform = {}, -- list
+      model = 'gemini-2.0-flash',
+      api_key = 'GEMINI_API_KEY', -- env var name
+      end_point = 'https://generativelanguage.googleapis.com/v1beta/models',
+      stream = true,
+      optional = {},
+      transform = {},
     },
 
     openai_fim_compatible = {
-      model = 'deepseek-chat', -- string
-      end_point = 'https://api.deepseek.com/beta/completions', -- string
-      api_key = 'DEEPSEEK_API_KEY', -- string — env var name
-      name = 'Deepseek', -- string
-      stream = true, -- boolean
-      optional = { stop = nil, max_tokens = nil }, -- table
-      transform = {}, -- list
-      get_text_fn = {}, -- list
+      model = 'deepseek-chat',
+      end_point = 'https://api.deepseek.com/beta/completions',
+      api_key = 'DEEPSEEK_API_KEY', -- env var name
+      name = 'Deepseek', -- label shown in notifications / model cards
+      stream = true,
+      optional = { stop = nil, max_tokens = nil },
+      transform = {},
+      get_text_fn = {},
     },
   },
 })
@@ -516,4 +434,4 @@ Current question:
 
 ## Advanced
 
-Prompt templates, FIM suffix handling, `transform` pipelines, and job pools are documented in [docs/technical.md](docs/technical.md).
+Prompt templates, FIM suffix handling, `transform` pipelines, and job pools are documented in [docs/technical.md](docs/technical.md). For a guided tour of the whole docs set, start at [docs/README.md](docs/README.md).

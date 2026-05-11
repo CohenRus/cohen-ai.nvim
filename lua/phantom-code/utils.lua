@@ -749,6 +749,24 @@ function M.prepend_to_complete_word(a, b)
     return a
 end
 
+--- First word-like run (alphanumeric + underscore) from the start of `str`, for partial inline accept.
+---@param str string
+---@return string
+function M.to_next_word(str)
+    return str:match('^.-[%a%d_]+') or ''
+end
+
+--- Plain substring test (byte-oriented).
+---@param haystack string
+---@param needle string
+---@return boolean
+function M.string_contains(haystack, needle)
+    if needle == '' then
+        return true
+    end
+    return haystack:find(needle, 1, true) ~= nil
+end
+
 ---Adjust indentation of lines based on direction
 ---@param lines string The string containing the lines to adjust
 ---@param ref_line string The reference line used to adjust identation
@@ -1248,9 +1266,10 @@ function M.resolve_provider_config(feature)
     local config = require('phantom-code').config
     local block = feature == 'expand' and (config.expand or {}) or (config.inline or {})
     local provider = block.provider or config.provider
-    local base_opts = vim.deepcopy(config.provider_options[provider] or {})
     local per_feature = block.provider_options and block.provider_options[provider] or {}
-    local merged = vim.tbl_deep_extend('force', base_opts, per_feature)
+    -- tbl_deep_extend already deep-copies all nested tables into a new table;
+    -- a pre-deepcopy of base_opts is redundant and doubles the allocation cost.
+    local merged = vim.tbl_deep_extend('force', config.provider_options[provider] or {}, per_feature)
     if feature == 'inline' then
         local po = config.inline and config.inline.prompt_overrides and config.inline.prompt_overrides[provider] or {}
         merged = vim.tbl_deep_extend('force', merged, po)

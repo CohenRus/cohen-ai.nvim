@@ -45,10 +45,13 @@ M.complete = function(context, callback, inline_opts)
 
     local get_text_fn = M.get_text_fn
 
-    if options.get_text_fn.stream and options.stream then
-        get_text_fn = options.get_text_fn.stream
-    elseif options.get_text_fn.no_stream and not options.stream then
-        get_text_fn = options.get_text_fn.no_stream
+    local gtf = options.get_text_fn
+    if type(gtf) == 'table' then
+        if gtf.stream and options.stream then
+            get_text_fn = gtf.stream
+        elseif gtf.no_stream and not options.stream then
+            get_text_fn = gtf.no_stream
+        end
     end
 
     base.complete_openai_fim_base(options, get_text_fn, context, callback, inline_opts)

@@ -2,3 +2,5 @@
 nvim.log
 *.log
 temp.cpp
+supermaven/*
+friend-nvim/
