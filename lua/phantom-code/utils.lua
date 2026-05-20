@@ -749,7 +749,11 @@ function M.prepend_to_complete_word(a, b)
     return a
 end
 
---- First word-like run (alphanumeric + underscore) from the start of `str`, for partial inline accept.
+--- Everything from the start of `str` through the first word token (alphanumeric +
+--- underscore), including any leading whitespace or punctuation. Used by
+--- `action.accept_word` to accept one logical word at a time while preserving
+--- indentation. Returns empty string when no word-like run is reachable (e.g. the
+--- string starts with a newline, which Lua's `.` does not match).
 ---@param str string
 ---@return string
 function M.to_next_word(str)

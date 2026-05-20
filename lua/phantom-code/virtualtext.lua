@@ -463,7 +463,9 @@ local function trigger(bufnr)
 
     local cmp_ctx = utils.make_cmp_context()
     local captured_cursor = api.nvim_win_get_cursor(0)
-    local captured_prefix = get_cursor_prefix(bufnr, captured_cursor)
+    -- Use the tail variant: the completion cache only stores the last 512 bytes
+    -- anyway, so reading the full prefix from buffer start is wasted allocation.
+    local captured_prefix = get_cursor_prefix_tail(bufnr, captured_cursor)
     local context = utils.enrich_llm_context(utils.get_context(cmp_ctx), cmp_ctx)
 
     local resolved = utils.resolve_provider_config 'inline'
@@ -504,41 +506,43 @@ local function trigger(bufnr)
             data = utils.add_single_line_entry(data)
         end
 
-        data = utils.list_dedup(data)
-
+        -- Single pass: dedup + max_lines truncation + normalize.
+        -- Previously three separate tbl_map / list_dedup calls allocated
+        -- three intermediate tables; coalescing them cuts GC pressure on the
+        -- inline response path (fires on every debounce cycle while typing).
         local max_lines = config.inline and config.inline.max_lines
-        if max_lines and data then
-            data = vim.tbl_map(function(item)
-                if type(item) ~= 'string' then
-                    return item
+        local do_normalize = config.inline.normalize_on_accept ~= false
+        if max_lines or do_normalize then
+            local norm_before, norm_after, norm_opts
+            if do_normalize then
+                local col_byte = cmp_ctx.cursor.col - 1
+                if col_byte < 0 then
+                    col_byte = 0
                 end
-                local lines = vim.split(item, '\n', { plain = true })
-                if #lines > max_lines then
-                    return table.concat(vim.list_slice(lines, 1, max_lines), '\n')
-                end
-                return item
-            end, data)
-        end
-
-        -- Match blink/cmp: same overlap + brace normalization as on accept so ghost text matches inserted text.
-        if config.inline.normalize_on_accept ~= false and data then
-            local row_line = cmp_ctx.cursor_line
-            local col_byte = cmp_ctx.cursor.col - 1
-            if col_byte < 0 then
-                col_byte = 0
+                norm_before = string.sub(cmp_ctx.cursor_line, 1, col_byte)
+                norm_after = string.sub(cmp_ctx.cursor_line, col_byte + 1)
+                norm_opts = { bufnr = cmp_ctx.bufnr, row0 = cmp_ctx.cursor.line, col0_byte = col_byte }
             end
-            local before_part = string.sub(row_line, 1, col_byte)
-            local after_part = string.sub(row_line, col_byte + 1)
-            data = vim.tbl_map(function(item)
-                if type(item) ~= 'string' then
-                    return item
+            local seen = {}
+            local coalesced = {}
+            for _, item in ipairs(data) do
+                if type(item) == 'string' then
+                    if max_lines then
+                        local lines = vim.split(item, '\n', { plain = true })
+                        if #lines > max_lines then
+                            item = table.concat(vim.list_slice(lines, 1, max_lines), '\n')
+                        end
+                    end
+                    if do_normalize then
+                        item = utils.normalize_inline_accept_suggestion(norm_before, norm_after, item, norm_opts)
+                    end
                 end
-                return utils.normalize_inline_accept_suggestion(before_part, after_part, item, {
-                    bufnr = cmp_ctx.bufnr,
-                    row0 = cmp_ctx.cursor.line,
-                    col0_byte = col_byte,
-                })
-            end, data)
+                if not seen[item] then
+                    seen[item] = true
+                    coalesced[#coalesced + 1] = item
+                end
+            end
+            data = coalesced
         end
 
         data = filter_inactive_blank_line_suggestions(data, cmp_ctx.cursor_before_line)
@@ -797,6 +801,7 @@ function action.accept_word()
     end
     local word = utils.to_next_word(suggestion)
     if word == '' then
+        utils.notify('phantom-code: accept_word found no word token in suggestion', 'debug')
         return
     end
     local tail = suggestion:sub(#word + 1)

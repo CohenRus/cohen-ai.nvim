@@ -356,10 +356,17 @@ local M = {
         -- Kept for backward compatibility; inline always requests exactly one candidate
         n_completions = 1,
 
-        -- Trim completion suffix when it overlaps this many chars with post-cursor text
+        -- Length of post-cursor text used for overlap filtering. When the suffix of a
+        -- completion candidate shares a common substring with the text immediately
+        -- following the cursor, and that overlap exceeds this many characters, the
+        -- overlapping portion is trimmed from the candidate. This prevents the model
+        -- from echoing text that already exists after the cursor.
         after_cursor_filter_length = 15,
 
-        -- Trim completion prefix when it overlaps this many chars with pre-cursor text
+        -- Length of pre-cursor text used for prefix overlap filtering. When the start
+        -- of a completion candidate overlaps with text before the cursor, the common
+        -- prefix is trimmed. Kept small (default 2) to avoid stripping meaningful
+        -- continuations.
         before_cursor_filter_length = 2,
 
         -- Fix brace/overlap artifacts when accepting a suggestion (virtual text + blink)

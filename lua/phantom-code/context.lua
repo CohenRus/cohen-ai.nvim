@@ -189,6 +189,12 @@ function M.gather_import_rows(bufnr, ft, max_lines_scan, max_imports)
         end
     end
     import_rows_cache[key] = { tick = tick, rows = out }
+    -- Evict oldest entry when cache exceeds a reasonable bound (long-running
+    -- sessions open hundreds of buffers; without eviction the cache grows
+    -- without bound).
+    if vim.tbl_count(import_rows_cache) > 200 then
+        import_rows_cache[next(import_rows_cache)] = nil
+    end
     return out
 end
 
@@ -225,21 +231,47 @@ local function row_matches(names, id_set)
     return false
 end
 
+-- Mtime-based file-head cache: avoids re-opening the same file on every
+-- inline trigger when imports haven't changed on disk. Cached entries
+-- store up to FILE_HEAD_CACHE_BUDGET bytes; callers with a smaller budget
+-- get a truncated view without re-reading.
+local file_head_cache = {}
+local FILE_HEAD_CACHE_MAX = 32
+local FILE_HEAD_CACHE_BUDGET = 8192
+
 ---@param path string
 ---@param budget integer
 ---@return string
-local function read_file_head(path, budget)
+local function read_file_head_cached(path, budget)
+    local stat = vim.uv.fs_stat(path)
+    if not stat then
+        return ''
+    end
+    local mtime = stat.mtime.sec
+    local entry = file_head_cache[path]
+    if entry and entry.mtime == mtime then
+        if #entry.content > budget then
+            return entry.content:sub(1, budget) .. '\n... (truncated)'
+        end
+        return entry.content
+    end
+    -- Read with headroom so subsequent calls with larger budgets can reuse.
+    local read_budget = math.max(budget, FILE_HEAD_CACHE_BUDGET)
     local fd = io.open(path, 'r')
     if not fd then
         return ''
     end
-    local chunk = fd:read(budget + 1)
+    local chunk = fd:read(read_budget + 1)
     fd:close()
     if not chunk then
         return ''
     end
+    if #file_head_cache >= FILE_HEAD_CACHE_MAX then
+        file_head_cache[next(file_head_cache)] = nil
+    end
+    file_head_cache[path] = { mtime = mtime, content = chunk }
     if #chunk > budget then
-        chunk = chunk:sub(1, budget) .. '\n... (truncated)'
+        return chunk:sub(1, budget) .. '\n... (truncated)'
     end
     return chunk
 end
@@ -310,7 +342,7 @@ function M.attach_import_snippets(context, cmp_context)
             if room < 200 then
                 break
             end
-            local body = read_file_head(path, room)
+            local body = read_file_head_cached(path, room)
             if body ~= '' then
                 local rel = vim.fn.fnamemodify(path, ':.')
                 local block = string.format('<importedFile path="%s">\n%s\n</importedFile>\n', rel, body)
